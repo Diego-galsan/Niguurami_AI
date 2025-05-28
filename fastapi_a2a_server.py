@@ -32,7 +32,7 @@ AGENT_REGISTRY: Dict[str, AgentCard] = {}
 # This is the publicly accessible base URL of this FastAPI application.
 # It's crucial for constructing correct a2a_endpoints in agent cards.
 # IMPORTANT: In production, get this from environment variables or a config file.
-APP_BASE_URL = "http://localhost:8000"
+APP_BASE_URL = "http://localhost:8001"
 # Example using environment variable:
 # import os
 # APP_BASE_URL = os.getenv("APP_PUBLIC_URL", "http://localhost:8000")
