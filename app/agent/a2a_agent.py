@@ -19,6 +19,7 @@ from app.tool.browser_use_tool import BrowserUseTool
 from app.tool.mcp import MCPClients, MCPClientTool
 from app.tool.python_execute import PythonExecute
 from app.tool.str_replace_editor import StrReplaceEditor
+from app.tool.current_time_tool import GetCurrentTimeTool # <<< ADD THIS
 
 # --- Import models for type hinting and use ---
 if TYPE_CHECKING:
@@ -47,6 +48,7 @@ class Manus(ToolCallAgent):
             StrReplaceEditor(),
             AskHuman(),
             Terminate(),
+            GetCurrentTimeTool()
         )
     )
     special_tool_names: list[str] = Field(default_factory=lambda: [Terminate().name])
