@@ -19,7 +19,8 @@ from app.tool.browser_use_tool import BrowserUseTool
 from app.tool.mcp import MCPClients, MCPClientTool
 from app.tool.python_execute import PythonExecute
 from app.tool.str_replace_editor import StrReplaceEditor
-
+from app.tool.delegate_task import ListAvailableAgentsTool, DelegateTaskToAgentTool
+import json
 # --- Import models for type hinting and use ---
 if TYPE_CHECKING:
     from app.models import AgentCard, AgentCapability, A2AMessageRequest
@@ -47,6 +48,8 @@ class Manus(ToolCallAgent):
             StrReplaceEditor(),
             AskHuman(),
             Terminate(),
+            ListAvailableAgentsTool(),
+            DelegateTaskToAgentTool(),
         )
     )
     special_tool_names: list[str] = Field(default_factory=lambda: [Terminate().name])
@@ -54,10 +57,127 @@ class Manus(ToolCallAgent):
     connected_servers: Dict[str, str] = Field(default_factory=dict)
     _initialized: bool = False
 
-    # _manus_agent_id: str
-    # _manus_public_name: str
-    # _a2a_base_url: str
-    # _a2a_full_endpoint: str
+
+    async def _execute_tool_logic(self, tool_name: str, tool_args: Dict[str, Any]) -> Any:
+        """
+        Executes specific logic for tools, especially those needing Manus instance context.
+        """
+        logger.debug(f"Manus ({self._manus_agent_id}) attempting to execute tool '{tool_name}' with args: {tool_args} via _execute_tool_logic.")
+        # Assuming self.available_tools.get_tool(tool_name) correctly retrieves the tool instance
+        tool_instance = self.available_tools.get_tool(tool_name) 
+        
+        if not tool_instance:
+            logger.error(f"Tool '{tool_name}' not found in Manus's available tools.")
+            return f"Error: Tool '{tool_name}' not found."
+
+        # --- Specific handling for tools needing context ---
+        if tool_name == "list_available_agents": # Match by the tool's 'name' attribute string
+            # ListAvailableAgentsTool's execute method needs the agent's base URL.
+            # The LLM provides no arguments for this tool (tool_args should be {}).
+            logger.info(f"Calling ListAvailableAgentsTool.execute with agent_base_url='{self._a2a_base_url}'")
+            return await tool_instance.execute(agent_base_url=self._a2a_base_url) # Pass context
+
+        elif tool_name == "delegate_task_to_agent": # Match by the tool's 'name' attribute string
+            # DelegateTaskToAgentTool's execute method needs the Manus instance itself
+            # and arguments from the LLM (target_agent_id, task_prompt, etc.).
+            logger.info(f"Calling DelegateTaskToAgentTool.execute with manus_agent_instance and LLM args: {tool_args}")
+            return await tool_instance.execute(
+                manus_agent_instance=self, # Pass context (the Manus agent instance itself)
+                **tool_args  # Unpack LLM-provided args like target_agent_id, task_prompt
+            )
+        
+        # --- Fallback for other tools that take arguments directly from LLM ---
+        else:
+            logger.info(f"Calling generic tool '{tool_name}' with args: {tool_args}")
+            # Assuming other tools have an 'execute' method and take their args directly from tool_args
+            if hasattr(tool_instance, 'execute') and callable(tool_instance.execute):
+                return await tool_instance.execute(**tool_args)
+            elif callable(tool_instance): # If tool itself is callable (less common for BaseTool pattern)
+                return await tool_instance(**tool_args)
+            else:
+                logger.error(f"Tool '{tool_name}' is not callable or has no 'execute' method.")
+                return f"Error: Tool '{tool_name}' cannot be executed or is not found."
+    
+        # Place this method inside your Manus class definition:
+    # class Manus(ToolCallAgent):
+    #     # ... other methods like __init__, create, think, _execute_tool_logic ...
+
+    async def act(self) -> None: # The signature might slightly vary if your base class dictates it, but `self` is key.
+        """
+        Executes the tool calls selected by the LLM in the previous `think` step.
+        This method calls `_execute_tool_logic` to handle context injection for specific tools.
+        """
+        print('Esto se ejecuta')
+        # self.tool_calls should be populated by your LLM interaction logic,
+        # typically after super().think() or a similar call in your Manus.think() method.
+        # It's expected to be a list of tool call objects (e.g., from OpenAI, they have 'id', 'function.name', 'function.arguments').
+        if not self.tool_calls:
+            logger.debug(f"Manus ({getattr(self, '_manus_agent_id', 'N/A')}) - act: No tool calls to execute.")
+            return
+
+        logger.info(f"Manus ({getattr(self, '_manus_agent_id', 'N/A')}) - act: Executing tool calls: {self.tool_calls}")
+        
+        # --- Ensure necessary imports are at the top of your agent file ---
+        # import json
+        # from app.schema import Message # Or your specific Message model for memory
+        # from app.logger import logger # If logger is not already globally available
+
+        for tool_call in self.tool_calls:
+            # The structure of tool_call depends on your LLM provider (e.g., OpenAI).
+            # These getattr calls provide a safe way to access nested attributes.
+            tool_name = getattr(getattr(tool_call, 'function', None), 'name', None)
+            tool_call_id = getattr(tool_call, 'id', None) # Essential for mapping response back to the call
+            raw_args_str = getattr(getattr(tool_call, 'function', None), 'arguments', "{}")
+
+            if not tool_name or not tool_call_id:
+                logger.error(f"Manus ({getattr(self, '_manus_agent_id', 'N/A')}) - act: Invalid tool_call object encountered: {tool_call}. Missing name or id.")
+                # Optionally add an error message to memory here for this malformed tool_call
+                # self.memory.add_message(Message.system_message(f"Error: Malformed tool call received: {tool_call}"))
+                continue 
+            
+            tool_args = {} # Default to empty dict for arguments
+            try:
+                # Ensure raw_args_str is not None and not empty before trying to load.
+                # Some LLMs might return an empty string or "null" for no arguments.
+                if raw_args_str and raw_args_str.strip() and raw_args_str.lower() != "null":
+                    tool_args = json.loads(raw_args_str)
+                
+                logger.info(f"Manus ({getattr(self, '_manus_agent_id', 'N/A')}) - act: Preparing to execute tool: '{tool_name}' (Call ID: {tool_call_id}) with parsed args: {tool_args}")
+
+                # Use our custom dispatcher (_execute_tool_logic) that knows about tool contexts
+                observation_content = await self._execute_tool_logic(tool_name, tool_args)
+                logger.info(f"Manus ({getattr(self, '_manus_agent_id', 'N/A')}) - act: Tool '{tool_name}' (Call ID: {tool_call_id}) execution result (first 500 chars): {str(observation_content)[:500]}...")
+
+            except json.JSONDecodeError as e_json:
+                logger.error(f"Manus ({getattr(self, '_manus_agent_id', 'N/A')}) - act: JSONDecodeError for tool '{tool_name}' (Call ID: {tool_call_id}) with raw args '{raw_args_str}': {e_json}", exc_info=True)
+                observation_content = f"Error: Invalid arguments provided for tool {tool_name}. Expected valid JSON. Details: {e_json}"
+            except Exception as e_exec:
+                logger.error(f"Manus ({getattr(self, '_manus_agent_id', 'N/A')}) - act: Error during _execute_tool_logic for '{tool_name}' (Call ID: {tool_call_id}): {e_exec}", exc_info=True)
+                observation_content = f"Error executing tool {tool_name}: {str(e_exec)}"
+            
+            # Add the observation (tool response) back to memory
+            # This part is CRITICAL and depends heavily on your agent's memory and Message schema.
+            if hasattr(self, 'memory') and self.memory and hasattr(self.memory, 'add_message'):
+                try:
+                    # Ensure content is a string. Some LLMs/frameworks might be picky.
+                    stringified_content = str(observation_content)
+                    
+                    # Create a tool response message. The exact method and parameters will
+                    # depend on your `app.schema.Message` class and how it expects tool responses.
+                    # This example assumes a factory method `tool_response_message` on your Message class.
+                    tool_response_msg = Message.tool_message(
+                        content=stringified_content,
+                        name=tool_name,  # Pass the name of the tool
+                        tool_call_id=tool_call_id
+                    )
+                    self.memory.add_message(tool_response_msg)
+                    logger.debug(f"Manus ({getattr(self, '_manus_agent_id', 'N/A')}) - act: Added observation for tool '{tool_name}' (Call ID: {tool_call_id}) to memory.")
+                except Exception as e_mem:
+                    logger.error(f"Manus ({getattr(self, '_manus_agent_id', 'N/A')}) - act: Failed to add tool observation to memory for '{tool_name}': {e_mem}", exc_info=True)
+            else:
+                logger.warning(f"Manus ({getattr(self, '_manus_agent_id', 'N/A')}) - act: Memory object or 'add_message' method not found. Observation for '{tool_name}' not recorded.")
+
+        self.tool_calls = [] # Clear processed tool calls
 
 
     @model_validator(mode="after")
@@ -360,7 +480,7 @@ class Manus(ToolCallAgent):
 
             # Execute the selected tools using self.act()
             if hasattr(self, 'act'):
-                 await self.act() # act() executes tools from self.tool_calls and adds observations to memory
+                await self.act() # act() executes tools from self.tool_calls and adds observations to memory
             else:
                 logger.warning("Manus agent 'step' or 'act' method not found. Cannot execute tools.")
                 break # Critical component missing
