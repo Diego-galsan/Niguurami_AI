@@ -149,6 +149,16 @@ class DelegateTaskToAgentTool(BaseTool):
             return {"status": "error", "message": "Manus agent instance not provided to DelegateTaskToAgentTool's execute method."}
         if not hasattr(manus_agent_instance, "_a2a_base_url") or not hasattr(manus_agent_instance, "send_a2a_message_to_another_agent"):
             return {"status": "error", "message": "Provided Manus agent instance is missing required attributes for delegation (_a2a_base_url or send_a2a_message_to_another_agent)."}
+         #To avoid registered itself
+        if target_agent_id == manus_agent_instance._manus_agent_id:
+            from app.logger import logger
+            logger.warning(f"DelegateTaskToAgentTool: Attempted to delegate task to self ({target_agent_id}). This is not allowed.")
+            return{
+                "status":"error",
+                "message":f"Delegate to self is not allowed. Please choose another agent. Agent ID: {target_agent_id}"
+            }
+
+
 
         agent_base_url = manus_agent_instance._a2a_base_url
         target_card_url = f"{agent_base_url.rstrip('/')}/discovery/agents/{target_agent_id}"
